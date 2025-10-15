@@ -1,6 +1,5 @@
 version: 2.1
 
-# Paramètres utiles (tu peux changer le tag d'image au déclenchement si besoin)
 parameters:
   image_tag:
     type: string
@@ -9,22 +8,19 @@ parameters:
 executors:
   deploy-executor:
     docker:
-      - image: cimg/deploy:stable   # docker + gcloud + kubectl préinstallés
+      - image: cimg/deploy:current   # <— tag valide (ou remplace par ex: 2024.08)
     working_directory: ~/repo
 
 commands:
   gcp-auth:
-    description: "Authenticate to Google Cloud and configure Artifact Registry"
     steps:
       - run:
           name: Authenticate to Google Cloud
           command: |
-            # GCLOUD_SERVICE_KEY doit être une clé service account encodée en base64
             echo "$GCLOUD_SERVICE_KEY" | base64 --decode > gcp-key.json
             gcloud auth activate-service-account --key-file=gcp-key.json
             gcloud config set project "$GOOGLE_PROJECT_ID"
             gcloud config set compute/region "$GOOGLE_COMPUTE_REGION"
-            # Login docker pour Artifact Registry
             gcloud auth configure-docker europe-west1-docker.pkg.dev -q
 
 jobs:
@@ -39,17 +35,14 @@ jobs:
       IMAGE_URI: europe-west1-docker.pkg.dev/${GOOGLE_PROJECT_ID}/mlops-app/mlops-app:<< pipeline.parameters.image_tag >>
     steps:
       - checkout
-      # moteur docker distant pour builder/pusher en sécurité
       - setup_remote_docker
       - gcp-auth
       - run:
-          name: Build Docker image
-          command: |
-            docker build -t "$IMAGE_URI" .
+          name: Build
+          command: docker build -t "$IMAGE_URI" .
       - run:
-          name: Push Docker image
-          command: |
-            docker push "$IMAGE_URI"
+          name: Push
+          command: docker push "$IMAGE_URI"
 
   deploy_to_gke:
     executor: deploy-executor
@@ -62,14 +55,10 @@ jobs:
           name: Get GKE credentials
           command: |
             gcloud container clusters get-credentials "$GKE_CLUSTER" \
-              --region "$GOOGLE_COMPUTE_REGION" \
-              --project "$GOOGLE_PROJECT_ID"
+              --region "$GOOGLE_COMPUTE_REGION" --project "$GOOGLE_PROJECT_ID"
       - run:
-          name: Deploy manifests
+          name: Deploy
           command: |
-            # Si ton manifest référence l'image via une variable, assure-toi qu'il la prend.
-            # Sinon, tu peux patcher l'image comme ci-dessous :
-            # kubectl set image deployment/mlops-app mlops-app="$IMAGE_URI" --record
             kubectl apply -f kubernetes-deployment.yaml
             kubectl rollout status deployment/mlops-app --timeout=120s || true
 
@@ -78,8 +67,6 @@ workflows:
     jobs:
       - checkout-code
       - build_docker_image:
-          requires:
-            - checkout-code
+          requires: [checkout-code]
       - deploy_to_gke:
-          requires:
-            - build_docker_image
+          requires: [build_docker_image]
