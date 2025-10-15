@@ -1,57 +1,80 @@
 version: 2.1
+
+# Paramètres utiles (tu peux changer le tag d'image au déclenchement si besoin)
+parameters:
+  image_tag:
+    type: string
+    default: "latest"
+
 executors:
-  docker-executor:
+  deploy-executor:
     docker:
-      - image: google/cloud-sdk:latest
+      - image: cimg/deploy:stable   # docker + gcloud + kubectl préinstallés
     working_directory: ~/repo
 
+commands:
+  gcp-auth:
+    description: "Authenticate to Google Cloud and configure Artifact Registry"
+    steps:
+      - run:
+          name: Authenticate to Google Cloud
+          command: |
+            # GCLOUD_SERVICE_KEY doit être une clé service account encodée en base64
+            echo "$GCLOUD_SERVICE_KEY" | base64 --decode > gcp-key.json
+            gcloud auth activate-service-account --key-file=gcp-key.json
+            gcloud config set project "$GOOGLE_PROJECT_ID"
+            gcloud config set compute/region "$GOOGLE_COMPUTE_REGION"
+            # Login docker pour Artifact Registry
+            gcloud auth configure-docker europe-west1-docker.pkg.dev -q
 
 jobs:
   checkout-code:
-    executor: docker-executor
+    executor: deploy-executor
     steps:
       - checkout
-      
 
   build_docker_image:
-    executor: docker-executor
+    executor: deploy-executor
+    environment:
+      IMAGE_URI: europe-west1-docker.pkg.dev/${GOOGLE_PROJECT_ID}/mlops-app/mlops-app:<< pipeline.parameters.image_tag >>
     steps:
       - checkout
+      # moteur docker distant pour builder/pusher en sécurité
       - setup_remote_docker
+      - gcp-auth
       - run:
-          name: Authenticate to Google Cloud
+          name: Build Docker image
           command: |
-            echo $GCLOUD_SERVICE_KEY | base64 --decode > gcp-key.json
-            gcloud auth activate-service-account --key-file=gcp-key.json
-            gcloud auth configure-docker europe-west1-docker.pkg.dev || gcloud auth configure-docker
+            docker build -t "$IMAGE_URI" .
       - run:
-          name: Build and Push Docker Image
+          name: Push Docker image
           command: |
-            docker build -t europe-west1-docker.pkg.dev/$GOOGLE_PROJECT_ID/mlops-app/mlops-app:latest .
-            docker push europe-west1-docker.pkg.dev/$GOOGLE_PROJECT_ID/mlops-app/mlops-app:latest
-  deploy_to_gke:
-    executor: docker-executor
-    steps:
-      - checkout
-      - setup_remote_docker
-      - run:
-          name: Authenticate to Google Cloud
-          command: |
-            echo $GCLOUD_SERVICE_KEY | base64 --decode > gcp-key.json
-            gcloud auth activate-service-account --key-file=gcp-key.json
-            gcloud auth configure-docker europe-west1-docker.pkg.dev || gcloud auth configure-docker
-      - run:
-          name: Configure gke
-          command: |
-            gcloud container clusters get-credentials $GKE_CLUSTER --region $GOOGLE_COMPUTE_REGION --project $GOOGLE_PROJECT_ID
+            docker push "$IMAGE_URI"
 
+  deploy_to_gke:
+    executor: deploy-executor
+    environment:
+      IMAGE_URI: europe-west1-docker.pkg.dev/${GOOGLE_PROJECT_ID}/mlops-app/mlops-app:<< pipeline.parameters.image_tag >>
+    steps:
+      - checkout
+      - gcp-auth
       - run:
-          name: Deploy to GKE
+          name: Get GKE credentials
           command: |
+            gcloud container clusters get-credentials "$GKE_CLUSTER" \
+              --region "$GOOGLE_COMPUTE_REGION" \
+              --project "$GOOGLE_PROJECT_ID"
+      - run:
+          name: Deploy manifests
+          command: |
+            # Si ton manifest référence l'image via une variable, assure-toi qu'il la prend.
+            # Sinon, tu peux patcher l'image comme ci-dessous :
+            # kubectl set image deployment/mlops-app mlops-app="$IMAGE_URI" --record
             kubectl apply -f kubernetes-deployment.yaml
+            kubectl rollout status deployment/mlops-app --timeout=120s || true
+
 workflows:
-  version: 2
-  deploy_pipline:
+  deploy_pipeline:
     jobs:
       - checkout-code
       - build_docker_image:
@@ -60,5 +83,3 @@ workflows:
       - deploy_to_gke:
           requires:
             - build_docker_image
-
-            
