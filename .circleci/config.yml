@@ -1,72 +1,63 @@
 version: 2.1
-
-parameters:
-  image_tag:
-    type: string
-    default: "latest"
-
 executors:
-  deploy-executor:
+  docker-executor:
     docker:
-      - image: cimg/deploy:current   # <— tag valide (ou remplace par ex: 2024.08)
+      - image: google/cloud-sdk:latest
     working_directory: ~/repo
 
-commands:
-  gcp-auth:
-    steps:
-      - run:
-          name: Authenticate to Google Cloud
-          command: |
-            echo "$GCLOUD_SERVICE_KEY" | base64 --decode > gcp-key.json
-            gcloud auth activate-service-account --key-file=gcp-key.json
-            gcloud config set project "$GOOGLE_PROJECT_ID"
-            gcloud config set compute/region "$GOOGLE_COMPUTE_REGION"
-            gcloud auth configure-docker europe-west1-docker.pkg.dev -q
 
 jobs:
   checkout-code:
-    executor: deploy-executor
+    executor: docker-executor
     steps:
       - checkout
-
+      
   build_docker_image:
-    executor: deploy-executor
-    environment:
-      IMAGE_URI: europe-west1-docker.pkg.dev/${GOOGLE_PROJECT_ID}/mlops-app/mlops-app:<< pipeline.parameters.image_tag >>
+    executor: docker-executor
     steps:
       - checkout
       - setup_remote_docker
-      - gcp-auth
       - run:
-          name: Build
-          command: docker build -t "$IMAGE_URI" .
+          name: Authenticate to Google Cloud
+          command: |
+            echo $GCLOUD_SERVICE_KEY | base64 --decode > gcp-key.json
+            gcloud auth activate-service-account --key-file=gcp-key.json
+            gcloud auth configure-docker europe-west1-docker.pkg.dev || gcloud auth configure-docker
       - run:
-          name: Push
-          command: docker push "$IMAGE_URI"
-
+          name: Build and Push Docker Image
+          command: |
+            docker build -t europe-west1-docker.pkg.dev/$GOOGLE_PROJECT_ID/mlops-app/mlops-app:latest .
+            docker push europe-west1-docker.pkg.dev/$GOOGLE_PROJECT_ID/mlops-app/mlops-app:latest
   deploy_to_gke:
-    executor: deploy-executor
-    environment:
-      IMAGE_URI: europe-west1-docker.pkg.dev/${GOOGLE_PROJECT_ID}/mlops-app/mlops-app:<< pipeline.parameters.image_tag >>
+    executor: docker-executor
     steps:
       - checkout
-      - gcp-auth
+      - 
       - run:
-          name: Get GKE credentials
+          name: Authenticate to Google Cloud
           command: |
-            gcloud container clusters get-credentials "$GKE_CLUSTER" \
-              --region "$GOOGLE_COMPUTE_REGION" --project "$GOOGLE_PROJECT_ID"
+            echo $GCLOUD_SERVICE_KEY | base64 --decode > gcp-key.json
+            gcloud auth activate-service-account --key-file=gcp-key.json
+            gcloud auth configure-docker europe-west1-docker.pkg.dev || gcloud auth configure-docker
       - run:
-          name: Deploy
+          name: Configure gke
+          command: |
+            gcloud container clusters get-credentials $GKE_CLUSTER --region $GOOGLE_COMPUTE_REGION --project $GOOGLE_PROJECT_ID
+
+      - run:
+          name: Deploy to GKE
           command: |
             kubectl apply -f kubernetes-deployment.yaml
-            kubectl rollout status deployment/mlops-app --timeout=120s || true
-
 workflows:
-  deploy_pipeline:
+  version: 2
+  deploy_pipline:
     jobs:
       - checkout-code
       - build_docker_image:
-          requires: [checkout-code]
+          requires:
+            - checkout-code
       - deploy_to_gke:
-          requires: [build_docker_image]
+          requires:
+            - build_docker_image
+
+            
